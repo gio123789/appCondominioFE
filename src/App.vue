@@ -3,6 +3,20 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echo from './echo'
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api'
+const demoUsers = [
+  {
+    email: 'residente101@demo.com',
+    password: '123456',
+    nombre: 'Residente 101',
+    departamento: 101,
+  },
+  {
+    email: 'residente102@demo.com',
+    password: '123456',
+    nombre: 'Residente 102',
+    departamento: 101,
+  },
+]
 
 const departamento = ref(101)
 const remitente = ref('Residente 101')
@@ -12,10 +26,27 @@ const cargando = ref(false)
 const enviando = ref(false)
 const error = ref('')
 const conectado = ref(false)
+const loginEmail = ref('')
+const loginPassword = ref('')
+const loginError = ref('')
+const currentUser = ref(null)
+const notifications = ref([])
+const selectedNotification = ref(null)
+const showNotifications = ref(false)
+const loadingNotifications = ref(false)
 
 let currentChannel = null
 
 const sortedMessages = computed(() => [...mensajes.value].sort((a, b) => a.id - b.id))
+const isLoggedIn = computed(() => !!currentUser.value)
+const unreadNotifications = computed(() => notifications.value.filter((item) => !item.leida).length)
+
+const notificationTypeLabel = {
+  mensaje: 'Mensaje',
+  multa: 'Multa',
+  asamblea: 'Asamblea',
+  pago_atrasado: 'Pago atrasado',
+}
 
 const formatDate = (isoDate) => {
   if (!isoDate) {
@@ -48,6 +79,31 @@ const loadMessages = async () => {
   }
 }
 
+const loadNotifications = async () => {
+  if (!departamento.value) {
+    return
+  }
+
+  loadingNotifications.value = true
+
+  try {
+    const response = await fetch(
+      `${apiBaseUrl}/notifications?departamento=${departamento.value}&limit=20`,
+    )
+
+    if (!response.ok) {
+      throw new Error('No se pudieron cargar notificaciones.')
+    }
+
+    const payload = await response.json()
+    notifications.value = payload.data ?? []
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    loadingNotifications.value = false
+  }
+}
+
 const subscribeToDepartment = () => {
   if (currentChannel) {
     echo.leave(currentChannel)
@@ -61,9 +117,123 @@ const subscribeToDepartment = () => {
     if (!exists) {
       mensajes.value.push(event)
     }
+  }).listen('.notificacion.nueva', (event) => {
+    const exists = notifications.value.some((item) => item.id === event.id)
+
+    if (!exists) {
+      notifications.value.unshift(event)
+    }
   })
 
   conectado.value = true
+}
+
+const loadAndSubscribe = async () => {
+  await loadMessages()
+  await loadNotifications()
+  subscribeToDepartment()
+}
+
+const openNotification = async (id) => {
+  try {
+    const response = await fetch(`${apiBaseUrl}/notifications/${id}`)
+
+    if (!response.ok) {
+      throw new Error('No se pudo obtener el detalle de la notificacion.')
+    }
+
+    const payload = await response.json()
+    selectedNotification.value = payload.data
+
+    await fetch(`${apiBaseUrl}/notifications/${id}/read`, {
+      method: 'PATCH',
+    })
+
+    notifications.value = notifications.value.map((item) =>
+      item.id === id
+        ? {
+            ...item,
+            leida: true,
+          }
+        : item,
+    )
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+const createDemoNotification = async (tipo) => {
+  try {
+    const payloadByType = {
+      multa: {
+        titulo: 'Multa registrada',
+        detalle: `Se genero una multa para el departamento ${departamento.value}.`,
+      },
+      asamblea: {
+        titulo: 'Nueva asamblea',
+        detalle: 'Asamblea general programada para el viernes 7:00 PM.',
+      },
+      pago_atrasado: {
+        titulo: 'Pago atrasado',
+        detalle: 'Tienes una mensualidad de mantenimiento vencida.',
+      },
+    }
+
+    const body = payloadByType[tipo]
+
+    await fetch(`${apiBaseUrl}/notifications`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        departamento: departamento.value,
+        tipo,
+        ...body,
+      }),
+    })
+  } catch (e) {
+    error.value = e.message
+  }
+}
+
+const login = async () => {
+  loginError.value = ''
+
+  const user = demoUsers.find(
+    (item) => item.email === loginEmail.value.trim() && item.password === loginPassword.value,
+  )
+
+  if (!user) {
+    loginError.value = 'Credenciales invalidas. Usa uno de los usuarios demo.'
+    return
+  }
+
+  currentUser.value = user
+  remitente.value = user.nombre
+  departamento.value = user.departamento
+  sessionStorage.setItem('chatDemoUser', JSON.stringify(user))
+
+  mensaje.value = ''
+  await loadAndSubscribe()
+}
+
+const logout = () => {
+  if (currentChannel) {
+    echo.leave(currentChannel)
+    currentChannel = null
+  }
+
+  currentUser.value = null
+  conectado.value = false
+  mensajes.value = []
+  mensaje.value = ''
+  error.value = ''
+  loginPassword.value = ''
+  sessionStorage.removeItem('chatDemoUser')
+  notifications.value = []
+  selectedNotification.value = null
+  showNotifications.value = false
 }
 
 const sendMessage = async () => {
@@ -100,13 +270,29 @@ const sendMessage = async () => {
 }
 
 watch(departamento, async () => {
-  await loadMessages()
-  subscribeToDepartment()
+  if (!isLoggedIn.value) {
+    return
+  }
+
+  await loadAndSubscribe()
 })
 
 onMounted(async () => {
-  await loadMessages()
-  subscribeToDepartment()
+  const savedUser = sessionStorage.getItem('chatDemoUser')
+
+  if (!savedUser) {
+    return
+  }
+
+  try {
+    const parsedUser = JSON.parse(savedUser)
+    currentUser.value = parsedUser
+    remitente.value = parsedUser.nombre
+    departamento.value = parsedUser.departamento
+    await loadAndSubscribe()
+  } catch {
+    sessionStorage.removeItem('chatDemoUser')
+  }
 })
 
 onBeforeUnmount(() => {
@@ -118,21 +304,102 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="chat-page">
-    <section class="chat-card">
+    <section v-if="!isLoggedIn" class="chat-card login-card">
       <header class="chat-header">
-        <h1>Chat entre departamentos</h1>
-        <p>Requerimiento implementado con WebSockets: mensajes en tiempo real.</p>
+        <h1>Login demo del chat</h1>
+        <p>Inicia sesion con alguno de los dos usuarios para comprobar WebSockets.</p>
       </header>
+
+      <form class="controls" @submit.prevent="login">
+        <label>
+          Correo
+          <input v-model="loginEmail" autocomplete="email" type="email" />
+        </label>
+
+        <label>
+          Contrasena
+          <input v-model="loginPassword" autocomplete="current-password" type="password" />
+        </label>
+
+        <button class="login-button" type="submit">Entrar</button>
+      </form>
+
+      <p v-if="loginError" class="error">{{ loginError }}</p>
+
+      <div class="demo-users">
+        <h3>Usuarios demo</h3>
+        <p>Usuario 1: residente101@demo.com / 123456</p>
+        <p>Usuario 2: residente102@demo.com / 123456</p>
+      </div>
+    </section>
+
+    <section v-else class="chat-card">
+      <header class="chat-header">
+        <div class="header-row">
+          <h1>Chat entre departamentos</h1>
+          <div class="top-actions">
+            <button class="bell-button" type="button" @click="showNotifications = !showNotifications">
+              <span class="bell-icon">&#128276;</span>
+              <span v-if="unreadNotifications" class="bell-count">{{ unreadNotifications }}</span>
+            </button>
+            <button class="logout-button" type="button" @click="logout">Salir</button>
+          </div>
+        </div>
+        <p>Requerimiento implementado con WebSockets: mensajes en tiempo real.</p>
+        <p class="small-note">
+          Sesion activa: {{ currentUser?.nombre }} (Depa {{ currentUser?.departamento }})
+        </p>
+      </header>
+
+      <section v-if="showNotifications" class="notifications-panel">
+        <div class="notification-head">
+          <h3>Notificaciones</h3>
+          <span>{{ unreadNotifications }} sin leer</span>
+        </div>
+
+        <div class="notification-actions">
+          <button type="button" @click="createDemoNotification('multa')">+ Multa</button>
+          <button type="button" @click="createDemoNotification('asamblea')">+ Asamblea</button>
+          <button type="button" @click="createDemoNotification('pago_atrasado')">+ Pago atrasado</button>
+        </div>
+
+        <p v-if="loadingNotifications">Cargando notificaciones...</p>
+
+        <article
+          v-for="item in notifications"
+          :key="item.id"
+          class="notification-item"
+          :class="{ unread: !item.leida }"
+          @click="openNotification(item.id)"
+        >
+          <div class="notification-meta">
+            <strong>{{ notificationTypeLabel[item.tipo] ?? item.tipo }}</strong>
+            <small>{{ formatDate(item.fecha) }}</small>
+          </div>
+          <p>{{ item.titulo }}</p>
+        </article>
+
+        <p v-if="!notifications.length && !loadingNotifications" class="empty">
+          No hay notificaciones por ahora.
+        </p>
+      </section>
+
+      <section v-if="selectedNotification" class="notification-detail">
+        <h3>Detalle de notificacion</h3>
+        <p><strong>Tipo:</strong> {{ notificationTypeLabel[selectedNotification.tipo] }}</p>
+        <p><strong>Titulo:</strong> {{ selectedNotification.titulo }}</p>
+        <p><strong>Detalle:</strong> {{ selectedNotification.detalle }}</p>
+      </section>
 
       <div class="controls">
         <label>
           Departamento
-          <input v-model.number="departamento" min="1" step="1" type="number" />
+          <input v-model.number="departamento" min="1" readonly step="1" type="number" />
         </label>
 
         <label>
           Nombre remitente
-          <input v-model="remitente" maxlength="80" type="text" />
+          <input v-model="remitente" maxlength="80" readonly type="text" />
         </label>
       </div>
 
@@ -202,6 +469,50 @@ onBeforeUnmount(() => {
   gap: 1rem;
 }
 
+.login-card {
+  margin-bottom: 1rem;
+}
+
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.bell-button {
+  width: auto;
+  padding: 0.45rem 0.7rem;
+  position: relative;
+  background: linear-gradient(120deg, #ca8800, #dba720);
+}
+
+.bell-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.bell-count {
+  position: absolute;
+  top: -7px;
+  right: -8px;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #a40e26;
+  color: #fff;
+  font-size: 0.72rem;
+  display: grid;
+  place-items: center;
+  border: 2px solid #fff;
+}
+
 .chat-header h1 {
   font-size: clamp(1.3rem, 3vw, 1.9rem);
   color: #172647;
@@ -210,6 +521,10 @@ onBeforeUnmount(() => {
 
 .chat-header p {
   color: #4a5570;
+}
+
+.small-note {
+  font-size: 0.86rem;
 }
 
 .controls {
@@ -244,6 +559,71 @@ textarea {
   align-items: center;
   gap: 0.65rem;
   min-height: 30px;
+}
+
+.notifications-panel {
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: #fff;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.notification-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.notification-actions {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.notification-actions button {
+  width: auto;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.82rem;
+  background: linear-gradient(120deg, #224370, #385f8f);
+}
+
+.notification-item {
+  border: 1px solid #d7e0eb;
+  border-radius: 10px;
+  padding: 0.55rem;
+  cursor: pointer;
+}
+
+.notification-item.unread {
+  border-color: #86a7da;
+  background: #f3f8ff;
+}
+
+.notification-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.2rem;
+}
+
+.notification-detail {
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  padding: 0.8rem;
+  background: #fff;
+}
+
+.demo-users {
+  border: 1px solid #dbe3ee;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 0.75rem;
+  color: #374668;
+}
+
+.demo-users h3 {
+  margin-bottom: 0.2rem;
 }
 
 .badge {
@@ -318,6 +698,17 @@ button {
   color: #fff;
   background: linear-gradient(120deg, #2557d6, #2f7bd9);
   cursor: pointer;
+}
+
+.login-button {
+  margin-top: 0.35rem;
+}
+
+.logout-button {
+  width: auto;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.86rem;
+  background: linear-gradient(120deg, #3b495f, #28384d);
 }
 
 button:disabled {
