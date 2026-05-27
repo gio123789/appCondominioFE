@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import echo from './echo'
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000/api'
@@ -33,13 +33,18 @@ const currentUser = ref(null)
 const notifications = ref([])
 const selectedNotification = ref(null)
 const showNotifications = ref(false)
+const notificationsHovered = ref(false)
 const loadingNotifications = ref(false)
+const messagesContainer = ref(null)
 
 let currentChannel = null
 
 const sortedMessages = computed(() => [...mensajes.value].sort((a, b) => a.id - b.id))
 const isLoggedIn = computed(() => !!currentUser.value)
 const unreadNotifications = computed(() => notifications.value.filter((item) => !item.leida).length)
+const isNotificationsPanelVisible = computed(
+  () => showNotifications.value || notificationsHovered.value,
+)
 
 const notificationTypeLabel = {
   mensaje: 'Mensaje',
@@ -57,6 +62,14 @@ const formatDate = (isoDate) => {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+const scrollMessagesToBottom = () => {
+  if (!messagesContainer.value) {
+    return
+  }
+
+  messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
 }
 
 const loadMessages = async () => {
@@ -132,6 +145,18 @@ const loadAndSubscribe = async () => {
   await loadMessages()
   await loadNotifications()
   subscribeToDepartment()
+}
+
+const toggleNotificationsPanel = () => {
+  showNotifications.value = !showNotifications.value
+}
+
+const openNotificationsOnHover = () => {
+  notificationsHovered.value = true
+}
+
+const closeNotificationsOnLeave = () => {
+  notificationsHovered.value = false
 }
 
 const openNotification = async (id) => {
@@ -234,6 +259,7 @@ const logout = () => {
   notifications.value = []
   selectedNotification.value = null
   showNotifications.value = false
+  notificationsHovered.value = false
 }
 
 const sendMessage = async () => {
@@ -276,6 +302,14 @@ watch(departamento, async () => {
 
   await loadAndSubscribe()
 })
+
+watch(
+  () => sortedMessages.value.length,
+  async () => {
+    await nextTick()
+    scrollMessagesToBottom()
+  },
+)
 
 onMounted(async () => {
   const savedUser = sessionStorage.getItem('chatDemoUser')
@@ -338,10 +372,54 @@ onBeforeUnmount(() => {
         <div class="header-row">
           <h1>Chat entre departamentos</h1>
           <div class="top-actions">
-            <button class="bell-button" type="button" @click="showNotifications = !showNotifications">
-              <span class="bell-icon">&#128276;</span>
-              <span v-if="unreadNotifications" class="bell-count">{{ unreadNotifications }}</span>
-            </button>
+            <div
+              class="notification-menu"
+              @mouseenter="openNotificationsOnHover"
+              @mouseleave="closeNotificationsOnLeave"
+            >
+              <button
+                class="bell-button"
+                :class="{ active: isNotificationsPanelVisible }"
+                type="button"
+                @click="toggleNotificationsPanel"
+              >
+                <span class="bell-icon">&#128276;</span>
+                <span v-if="unreadNotifications" class="bell-count">{{ unreadNotifications }}</span>
+              </button>
+
+              <section v-if="isNotificationsPanelVisible" class="notifications-panel">
+                <div class="notification-head">
+                  <h3>Notificaciones</h3>
+                  <span>{{ unreadNotifications }} sin leer</span>
+                </div>
+
+                <div class="notification-actions">
+                  <button type="button" @click="createDemoNotification('multa')">+ Multa</button>
+                  <button type="button" @click="createDemoNotification('asamblea')">+ Asamblea</button>
+                  <button type="button" @click="createDemoNotification('pago_atrasado')">+ Pago atrasado</button>
+                </div>
+
+                <p v-if="loadingNotifications">Cargando notificaciones...</p>
+
+                <article
+                  v-for="item in notifications"
+                  :key="item.id"
+                  class="notification-item"
+                  :class="{ unread: !item.leida }"
+                  @click="openNotification(item.id)"
+                >
+                  <div class="notification-meta">
+                    <strong>{{ notificationTypeLabel[item.tipo] ?? item.tipo }}</strong>
+                    <small>{{ formatDate(item.fecha) }}</small>
+                  </div>
+                  <p>{{ item.titulo }}</p>
+                </article>
+
+                <p v-if="!notifications.length && !loadingNotifications" class="empty">
+                  No hay notificaciones por ahora.
+                </p>
+              </section>
+            </div>
             <button class="logout-button" type="button" @click="logout">Salir</button>
           </div>
         </div>
@@ -350,39 +428,6 @@ onBeforeUnmount(() => {
           Sesion activa: {{ currentUser?.nombre }} (Depa {{ currentUser?.departamento }})
         </p>
       </header>
-
-      <section v-if="showNotifications" class="notifications-panel">
-        <div class="notification-head">
-          <h3>Notificaciones</h3>
-          <span>{{ unreadNotifications }} sin leer</span>
-        </div>
-
-        <div class="notification-actions">
-          <button type="button" @click="createDemoNotification('multa')">+ Multa</button>
-          <button type="button" @click="createDemoNotification('asamblea')">+ Asamblea</button>
-          <button type="button" @click="createDemoNotification('pago_atrasado')">+ Pago atrasado</button>
-        </div>
-
-        <p v-if="loadingNotifications">Cargando notificaciones...</p>
-
-        <article
-          v-for="item in notifications"
-          :key="item.id"
-          class="notification-item"
-          :class="{ unread: !item.leida }"
-          @click="openNotification(item.id)"
-        >
-          <div class="notification-meta">
-            <strong>{{ notificationTypeLabel[item.tipo] ?? item.tipo }}</strong>
-            <small>{{ formatDate(item.fecha) }}</small>
-          </div>
-          <p>{{ item.titulo }}</p>
-        </article>
-
-        <p v-if="!notifications.length && !loadingNotifications" class="empty">
-          No hay notificaciones por ahora.
-        </p>
-      </section>
 
       <section v-if="selectedNotification" class="notification-detail">
         <h3>Detalle de notificacion</h3>
@@ -411,7 +456,7 @@ onBeforeUnmount(() => {
         <span v-if="error" class="error">{{ error }}</span>
       </div>
 
-      <main class="messages">
+      <main ref="messagesContainer" class="messages">
         <article
           v-for="item in sortedMessages"
           :key="item.id"
@@ -486,11 +531,19 @@ onBeforeUnmount(() => {
   gap: 0.55rem;
 }
 
+.notification-menu {
+  position: relative;
+}
+
 .bell-button {
   width: auto;
   padding: 0.45rem 0.7rem;
   position: relative;
   background: linear-gradient(120deg, #ca8800, #dba720);
+}
+
+.bell-button.active {
+  box-shadow: 0 0 0 2px #f4d17f;
 }
 
 .bell-icon {
@@ -562,12 +615,18 @@ textarea {
 }
 
 .notifications-panel {
+  position: absolute;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  width: min(420px, 86vw);
+  z-index: 20;
   border: 1px solid #dbe3ee;
   border-radius: 12px;
   padding: 0.75rem;
   background: #fff;
   display: grid;
   gap: 0.6rem;
+  box-shadow: 0 14px 28px -22px #0f2248;
 }
 
 .notification-head {
