@@ -35,7 +35,12 @@ const selectedNotification = ref(null)
 const showNotifications = ref(false)
 const notificationsHovered = ref(false)
 const loadingNotifications = ref(false)
+const loginLoading = ref(false)
+const creatingType = ref('')
+const loadingNotificationDetail = ref(false)
+const requestAlert = ref(null)
 const messagesContainer = ref(null)
+let alertTimer = null
 
 let currentChannel = null
 
@@ -70,6 +75,21 @@ const scrollMessagesToBottom = () => {
   }
 
   messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+}
+
+const showRequestAlert = (message, type = 'success') => {
+  requestAlert.value = {
+    message,
+    type,
+  }
+
+  if (alertTimer) {
+    clearTimeout(alertTimer)
+  }
+
+  alertTimer = setTimeout(() => {
+    requestAlert.value = null
+  }, 2300)
 }
 
 const loadMessages = async () => {
@@ -160,6 +180,8 @@ const closeNotificationsOnLeave = () => {
 }
 
 const openNotification = async (id) => {
+  loadingNotificationDetail.value = true
+
   try {
     const response = await fetch(`${apiBaseUrl}/notifications/${id}`)
 
@@ -182,12 +204,19 @@ const openNotification = async (id) => {
           }
         : item,
     )
+
+    showRequestAlert('Detalle de notificacion cargado.', 'success')
   } catch (e) {
     error.value = e.message
+    showRequestAlert(e.message, 'error')
+  } finally {
+    loadingNotificationDetail.value = false
   }
 }
 
 const createDemoNotification = async (tipo) => {
+  creatingType.value = tipo
+
   try {
     const payloadByType = {
       multa: {
@@ -206,7 +235,7 @@ const createDemoNotification = async (tipo) => {
 
     const body = payloadByType[tipo]
 
-    await fetch(`${apiBaseUrl}/notifications`, {
+    const response = await fetch(`${apiBaseUrl}/notifications`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -217,30 +246,46 @@ const createDemoNotification = async (tipo) => {
         ...body,
       }),
     })
+
+    if (!response.ok) {
+      throw new Error('No se pudo crear la notificacion.')
+    }
+
+    showRequestAlert('Notificacion creada correctamente.', 'success')
   } catch (e) {
     error.value = e.message
+    showRequestAlert(e.message, 'error')
+  } finally {
+    creatingType.value = ''
   }
 }
 
 const login = async () => {
   loginError.value = ''
+  loginLoading.value = true
 
-  const user = demoUsers.find(
-    (item) => item.email === loginEmail.value.trim() && item.password === loginPassword.value,
-  )
+  try {
+    const user = demoUsers.find(
+      (item) => item.email === loginEmail.value.trim() && item.password === loginPassword.value,
+    )
 
-  if (!user) {
-    loginError.value = 'Credenciales invalidas. Usa uno de los usuarios demo.'
-    return
+    if (!user) {
+      loginError.value = 'Credenciales invalidas. Usa uno de los usuarios demo.'
+      showRequestAlert(loginError.value, 'error')
+      return
+    }
+
+    currentUser.value = user
+    remitente.value = user.nombre
+    departamento.value = user.departamento
+    sessionStorage.setItem('chatDemoUser', JSON.stringify(user))
+
+    mensaje.value = ''
+    await loadAndSubscribe()
+    showRequestAlert('Inicio de sesion correcto.', 'success')
+  } finally {
+    loginLoading.value = false
   }
-
-  currentUser.value = user
-  remitente.value = user.nombre
-  departamento.value = user.departamento
-  sessionStorage.setItem('chatDemoUser', JSON.stringify(user))
-
-  mensaje.value = ''
-  await loadAndSubscribe()
 }
 
 const logout = () => {
@@ -284,12 +329,23 @@ const sendMessage = async () => {
     })
 
     if (!response.ok) {
-      throw new Error('No fue posible enviar el mensaje.')
+      let backendMessage = 'No fue posible enviar el mensaje.'
+
+      try {
+        const payload = await response.json()
+        backendMessage = payload.message ?? backendMessage
+      } catch {
+        // Keep default message when response is not JSON.
+      }
+
+      throw new Error(backendMessage)
     }
 
     mensaje.value = ''
+    showRequestAlert('Mensaje enviado.', 'success')
   } catch (e) {
     error.value = e.message
+    showRequestAlert(e.message, 'error')
   } finally {
     enviando.value = false
   }
@@ -355,7 +411,19 @@ onBeforeUnmount(() => {
           <input v-model="loginPassword" autocomplete="current-password" type="password" />
         </label>
 
-        <button class="login-button" type="submit">Entrar</button>
+        <Transition name="button-pop" mode="out-in">
+          <button
+            v-if="!loginLoading"
+            key="login-ready"
+            class="login-button"
+            type="submit"
+          >
+            Entrar
+          </button>
+          <button v-else key="login-loading" class="login-button loading-button" disabled type="button">
+            Validando...
+          </button>
+        </Transition>
       </form>
 
       <p v-if="loginError" class="error">{{ loginError }}</p>
@@ -365,6 +433,12 @@ onBeforeUnmount(() => {
         <p>Usuario 1: residente101@demo.com / 123456</p>
         <p>Usuario 2: residente102@demo.com / 123456</p>
       </div>
+
+      <Transition name="alert-slide">
+        <div v-if="requestAlert" class="request-alert" :class="requestAlert.type">
+          {{ requestAlert.message }}
+        </div>
+      </Transition>
     </section>
 
     <section v-else class="chat-card">
@@ -394,9 +468,41 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="notification-actions">
-                  <button type="button" @click="createDemoNotification('multa')">+ Multa</button>
-                  <button type="button" @click="createDemoNotification('asamblea')">+ Asamblea</button>
-                  <button type="button" @click="createDemoNotification('pago_atrasado')">+ Pago atrasado</button>
+                  <Transition name="button-pop" mode="out-in">
+                    <button
+                      v-if="creatingType !== 'multa'"
+                      key="btn-multa-ready"
+                      type="button"
+                      @click="createDemoNotification('multa')"
+                    >
+                      + Multa
+                    </button>
+                    <button v-else key="btn-multa-loading" disabled type="button">Creando...</button>
+                  </Transition>
+
+                  <Transition name="button-pop" mode="out-in">
+                    <button
+                      v-if="creatingType !== 'asamblea'"
+                      key="btn-asamblea-ready"
+                      type="button"
+                      @click="createDemoNotification('asamblea')"
+                    >
+                      + Asamblea
+                    </button>
+                    <button v-else key="btn-asamblea-loading" disabled type="button">Creando...</button>
+                  </Transition>
+
+                  <Transition name="button-pop" mode="out-in">
+                    <button
+                      v-if="creatingType !== 'pago_atrasado'"
+                      key="btn-pago-ready"
+                      type="button"
+                      @click="createDemoNotification('pago_atrasado')"
+                    >
+                      + Pago atrasado
+                    </button>
+                    <button v-else key="btn-pago-loading" disabled type="button">Creando...</button>
+                  </Transition>
                 </div>
 
                 <p v-if="loadingNotifications">Cargando notificaciones...</p>
@@ -431,9 +537,14 @@ onBeforeUnmount(() => {
 
       <section v-if="selectedNotification" class="notification-detail">
         <h3>Detalle de notificacion</h3>
+        <Transition name="fade-swap" mode="out-in">
+          <p v-if="loadingNotificationDetail" key="notif-loading">Cargando detalle...</p>
+          <div v-else key="notif-ready">
         <p><strong>Tipo:</strong> {{ notificationTypeLabel[selectedNotification.tipo] }}</p>
         <p><strong>Titulo:</strong> {{ selectedNotification.titulo }}</p>
         <p><strong>Detalle:</strong> {{ selectedNotification.detalle }}</p>
+          </div>
+        </Transition>
       </section>
 
       <div class="controls">
@@ -482,10 +593,21 @@ onBeforeUnmount(() => {
           placeholder="Escribe un mensaje para tu departamento..."
           rows="3"
         />
-        <button :disabled="enviando || !mensaje.trim()" type="submit">
-          {{ enviando ? 'Enviando...' : 'Enviar' }}
-        </button>
+        <Transition name="button-pop" mode="out-in">
+          <button v-if="!enviando" key="send-ready" :disabled="!mensaje.trim()" type="submit">
+            Enviar
+          </button>
+          <button v-else key="send-loading" class="loading-button" disabled type="button">
+            Enviando...
+          </button>
+        </Transition>
       </form>
+
+      <Transition name="alert-slide">
+        <div v-if="requestAlert" class="request-alert" :class="requestAlert.type">
+          {{ requestAlert.message }}
+        </div>
+      </Transition>
     </section>
   </div>
 </template>
@@ -641,6 +763,10 @@ textarea {
   flex-wrap: wrap;
 }
 
+.loading-button {
+  opacity: 0.8;
+}
+
 .notification-actions button {
   width: auto;
   padding: 0.45rem 0.65rem;
@@ -671,6 +797,25 @@ textarea {
   border-radius: 12px;
   padding: 0.8rem;
   background: #fff;
+}
+
+.request-alert {
+  border-radius: 12px;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.request-alert.success {
+  border: 1px solid #86efac;
+  background: #ecfdf3;
+  color: #14532d;
+}
+
+.request-alert.error {
+  border: 1px solid #fda4af;
+  background: #fff1f2;
+  color: #9f1239;
 }
 
 .demo-users {
@@ -773,5 +918,37 @@ button {
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.button-pop-enter-active,
+.button-pop-leave-active {
+  transition: all 0.2s ease;
+}
+
+.button-pop-enter-from,
+.button-pop-leave-to {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+
+.alert-slide-enter-active,
+.alert-slide-leave-active {
+  transition: all 0.25s ease;
+}
+
+.alert-slide-enter-from,
+.alert-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.fade-swap-enter-active,
+.fade-swap-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.fade-swap-enter-from,
+.fade-swap-leave-to {
+  opacity: 0;
 }
 </style>
